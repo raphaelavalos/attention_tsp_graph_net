@@ -1,0 +1,6 @@
+networkx
+tensorflow_gpu
+tensorflow_probability_gpu
+numpy
+graph_nets
+dm-sonnet
