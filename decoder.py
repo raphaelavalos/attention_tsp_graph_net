@@ -10,6 +10,7 @@ from graph_nets import graphs
 from graph_nets import blocks
 from graph_nets import modules
 import sonnet as snt
+import utils
 
 
 class Decoder(snt.AbstractModule):
@@ -17,6 +18,8 @@ class Decoder(snt.AbstractModule):
     def __init__(self, conf, name="decoder-attention-tsp"):
         super(Decoder, self).__init__(name=name)
         self.conf = conf
+        self.training = True
+        self.baseline = False
         with self._enter_variable_scope():
             initializers = {"w": tf.initializers.random_uniform(-self.conf.init_max, self.conf.init_max)}
             self._query_layer_0 = snt.Linear(output_size=self.conf.head_nbr * self.conf.query_dim,
@@ -40,13 +43,45 @@ class Decoder(snt.AbstractModule):
                                            initializers=initializers,
                                            name="key_computer_1")
             self._v1 = tf.get_variable(name="v1",
-                                       shape=(1, self.conf.embedding_dim))
+                                       shape=(1, self.conf.embedding_dim),
+                                       trainable=True)
             self._vf = tf.get_variable(name="vf",
-                                       shape=(1, self.conf.embedding_dim))
+                                       shape=(1, self.conf.embedding_dim),
+                                       trainable=True)
             self._W = tf.get_variable(name="multi_head_reducer",
                                       shape=(self.conf.value_dim, self.conf.embedding_dim),
                                       initializer=tf.initializers.random_uniform(-self.conf.init_max,
-                                                                                 self.conf.init_max))
+                                                                                 self.conf.init_max),
+                                      trainable=True)
+
+    def modify_state(self, training=True, baseline=False):
+        self.training = training
+        self.baseline = baseline
+
+    def load(self, dic, sess):
+        with self._enter_variable_scope():
+            utils.load_linear(self._query_layer_0, dic["query_computer_0"], sess)
+            utils.load_linear(self._value_layer_0, dic["value_computer_0"], sess)
+            utils.load_linear(self._key_layer_0, dic["key_computer_0"], sess)
+            utils.load_linear(self._query_layer_1, dic["query_computer_1"], sess)
+            utils.load_linear(self._key_layer_1, dic["key_computer_1"], sess)
+            self._v1.load(dic["v1"], sess)
+            self._vf.load(dic["vf"], sess)
+            self._W.load(dic["multi_head_reducer"], sess)
+
+    def save(self, sess):
+        with self._enter_variable_scope():
+            dic = {
+                "query_computer_0": utils.save_linear(self._query_layer_0, sess),
+                "value_computer_0": utils.save_linear(self._value_layer_0, sess),
+                "key_computer_0": utils.save_linear(self._key_layer_0, sess),
+                "query_computer_1": utils.save_linear(self._query_layer_1, sess),
+                "key_computer_1": utils.save_linear(self._key_layer_1, sess),
+                "v1": self._v1.eval(sess),
+                "vf": self._vf.eval(sess),
+                "multi_head_reducer": self._W.eval(sess)
+            }
+        return dic
 
     def _build(self, graph):
         """Decodes the graph
@@ -128,12 +163,17 @@ class Decoder(snt.AbstractModule):
 
             output_log_proba.append(tf.nn.log_softmax(u_c_n, axis=1))
 
-            pi_t = tf.argmax(output_log_proba[-1], axis=1)
+            if self.baseline:
+                pi_t = tf.argmax(output_log_proba[-1], axis=1)
+            else:
+                pi_t = tf.random.multinomial(output_log_proba[-1], num_samples=1)
+                pi_t = tf.reshape(pi_t, shape=(self.conf.batch,))
 
             pi = tf.scatter_nd_update(pi,
                                       tf.stack([tf.range(self.conf.batch, dtype=tf.int64),
                                                 tf.cast(tf.broadcast_to(t, [self.conf.batch]), tf.int64)], axis=1),
                                       pi_t)
+
 
         stacked_log_proba = tf.stack(output_log_proba, axis=1)
         index = tf.stack([tf.convert_to_tensor(

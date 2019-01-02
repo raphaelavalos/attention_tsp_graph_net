@@ -3,10 +3,6 @@ from __future__ import division
 from __future__ import print_function
 
 import numpy as np
-import collections
-import encoder
-import decoder
-
 import tensorflow as tf
 from graph_nets import utils_tf
 from graph_nets import utils_np
@@ -14,15 +10,43 @@ from graph_nets import graphs
 from graph_nets import blocks
 from graph_nets import modules
 import sonnet as snt
-from models import AttentionTspModel
+import utils
+from encoder import Encoder
+from decoder import Decoder
 
-class TSP_Trainer:
 
-    def __init__(self, opt, conf):
-        self.opt = opt
-        self.conf = conf
-        self.model = AttentionTspModel(conf)
+class AttentionTspModel(snt.AbstractModule):
+
+    def __init__(self, conf, name="attention_tsp_model"):
+        super(AttentionTspModel, self).__init__(name=name)
         self.training = True
+        self.conf = conf
+        with self._enter_variable_scope():
+            self._encoder = Encoder(conf)
+            self._decoder = Decoder(conf)
+
+    def modify_state(self, training=True, baseline=False):
+        self.training = training
+        self._encoder.modify_state(training)
+        self._decoder.modify_state(training, baseline)
+
+    def load(self, dic, sess):
+        with self._enter_variable_scope():
+            self._encoder.load(dic["encoder"], sess)
+            self._decoder.load(dic["decoder"], sess)
+
+    def save(self, sess):
+        with self._enter_variable_scope():
+            dic = {
+                "encoder": self._encoder.save(sess),
+                "decoder": self._decoder.save(sess)
+            }
+        return dic
+
+    def _build(self, graph):
+        pi, computed_log_likelihood = self._decoder(self._encoder(graph))
+        result_graph, cost = self.create_result_graph(graph, pi)
+        return pi, computed_log_likelihood, result_graph, cost
 
     def create_result_graph(self, graph, pi):
         receivers = tf.roll(pi, shift=-1, axis=1)
@@ -41,23 +65,3 @@ class TSP_Trainer:
         graph = graph.replace(edges=distance, globals=cost)
         return graph, cost
 
-    def modify_state(self, training):
-        self.training = training
-        self.model.modify_state(training)
-
-    def load_model(self, dic):
-        self.model.load(dic)
-
-    def save_model(self, sess):
-        return self.model.save(sess)
-
-    def forward(self, graph):
-        pi, computed_log_likelihood = self.model(graph)
-        result_graph, cost = self.create_result_graph(graph, pi)
-        return result_graph, cost, computed_log_likelihood
-
-    def compute_loss(self, cost, computed_log_likelihood):
-        loss = tf.reduce_mean(tf.multiply(cost, computed_log_likelihood))
-        # if baseline is not None:
-        #     grad_loss = tf.subtract(grad_loss, baseline)
-        return loss

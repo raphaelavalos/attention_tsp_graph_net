@@ -2,14 +2,12 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import numpy as np
 import tensorflow as tf
-from graph_nets import utils_tf
-from graph_nets import utils_np
 from graph_nets import graphs
 from graph_nets import blocks
 from graph_nets import modules
 import sonnet as snt
+import utils
 
 
 class MultiHeadAttentionResidual(snt.AbstractModule):
@@ -28,6 +26,7 @@ class MultiHeadAttentionResidual(snt.AbstractModule):
         super(MultiHeadAttentionResidual, self).__init__(name=name)
         self.training = True
         self.conf = conf
+        self.training = True
         with self._enter_variable_scope():
             initializers = {"w": tf.initializers.random_uniform(-self.conf.init_max, self.conf.init_max)}
             self._query_layer = snt.Linear(output_size=self.conf.head_nbr * self.conf.query_dim,
@@ -46,7 +45,28 @@ class MultiHeadAttentionResidual(snt.AbstractModule):
             self._W = tf.get_variable(name="multi_head_reducer",
                                       shape=(self.conf.value_dim, self.conf.embedding_dim),
                                       initializer=tf.initializers.random_uniform(-self.conf.init_max,
-                                                                                 self.conf.init_max))
+                                                                                 self.conf.init_max),
+                                      trainable=True)
+
+    def modify_state(self, training=True):
+        self.training = training
+
+    def load(self, dic, sess):
+        with self._enter_variable_scope():
+            utils.load_linear(self._query_layer, dic["query_computer"], sess)
+            utils.load_linear(self._value_layer, dic["value_layer"], sess)
+            utils.load_linear(self._key_layer, dic["key_layer"], sess)
+            self._W.load(dic["multi_head_reducer"], sess)
+
+    def save(self, sess):
+        with self._enter_variable_scope():
+            dic = {
+                "query_computer": utils.save_linear(self._query_layer, sess),
+                "value_layer": utils.save_linear(self._value_layer, sess),
+                "key_layer": utils.save_linear(self._key_layer, sess),
+                "multi_head_reducer": self._W.eval(sess)
+            }
+        return dic
 
     def _build(self, graph):
         """Perform a Multi Head Attention over a graph
@@ -123,6 +143,26 @@ class EncoderLayer(snt.AbstractModule):
                                                         use_globals=False,
                                                         name="encoder_block")
 
+    def modify_state(self, training=True):
+        self.training = training
+
+    def load(self, dic, sess):
+        with self._enter_variable_scope():
+            self._mha.load(dic['multi_head_attention'], sess)
+            utils.load_batchnorm(self._batch_norm, dic['batch_norm'], sess)
+            utils.load_linear(self._lin_to_hidden, dic['lin_to_hidden'],sess, bias=True)
+            utils.load_linear(self._hidden_to_ouput, dic['hidden_to_output'], sess, bias=True)
+
+    def save(self, sess):
+        with self._enter_variable_scope():
+            dic = {
+                "multi_head_attention": self._mha.save(sess),
+                "batch_norm": utils.save_batchnorm(self._batch_norm, sess),
+                "lin_to_hidden": utils.save_linear(self._lin_to_hidden, sess, bias=True),
+                "hidden_to_output": utils.save_linear(self._hidden_to_ouput, sess, bias=True)
+            }
+        return dic
+
     def _build(self, graph):
         """
 
@@ -168,6 +208,24 @@ class Encoder(snt.AbstractModule):
                                                               name="initial_block_projection")
             self._encoder_layers = [EncoderLayer(conf, "encoder_layer_%i" % i) for i in
                                     range(self.conf.encoder_nbr_layers)]
+
+    def modify_state(self, training=True):
+        self.training = training
+
+    def load(self, dic, sess):
+        with self._enter_variable_scope():
+            utils.load_linear(self._initial_projection, dic['initial_projection'], sess, bias=True)
+            for i in range(self.conf.encoder_nbr_layers):
+                self._encoder_layers[i].load(dic["encoder_layer_%i" % i], sess)
+
+    def save(self, sess):
+        with self._enter_variable_scope():
+            dic = {
+                'initial_projection': utils.save_linear(self._initial_projection, sess, bias=True),
+            }
+            for i in range(self.conf.encoder_nbr_layers):
+                dic["encoder_layer_%i" % i] = self._encoder_layers[i].save(sess)
+        return dic
 
     def _build(self, graph):
         """Encodes the graph
