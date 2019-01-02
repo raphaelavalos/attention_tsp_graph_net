@@ -35,7 +35,7 @@ if __name__ == '__main__':
     parser.add_argument('--save_freq', type=int, default=10, help="Save model every _ epochs (default: 10).", required=False)
     parser.add_argument('--step_per_epoch', type=int, default=2500, help="Number of step per epoch (default: 2500).",
                         required=False)
-    parser.add_argument('--freq_update', type=int default=500, help="Get update every _ steps (default: 500).", required=False)
+    parser.add_argument('--freq_update', type=int, default=500, help="Get update every _ steps (default: 500).", required=False)
     parser.add_argument('--batch', type=int, default=512, help="Batch size (default: 512).", required=False)
     parser.add_argument('--encoder_layer', type=int, default=3, help="Number of encoder layers (default: 3).", required=False)
     parser.add_argument('--v', type=bool, default=False, help="Verbose (default: False).", required=False)
