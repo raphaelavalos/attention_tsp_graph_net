@@ -18,27 +18,27 @@ from tqdm import trange
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Attention TSP Train Module")
-    parser.add_argument('--nodes', default=20, help="The number of nodes per graph ex: 20, 50, 100.", required=False)
-    parser.add_argument('--cuda', default=True, help="Use cuda (default True)", required=False)
-    parser.add_argument('--main_gpu', default=0,
+    parser.add_argument('--nodes', default=20, type=int, help="The number of nodes per graph ex: 20, 50, 100.", required=False)
+    parser.add_argument('--cuda', default=True, type=bool, help="Use cuda (default True)", required=False)
+    parser.add_argument('--main_gpu', type=int, default=0,
                         help="The id of the GPU to use for the main computation, -1 for CPU (default: 0).",
                         required=False)
-    parser.add_argument('--baseline_gpu', default=-1,
+    parser.add_argument('--baseline_gpu', type=int, default=-1,
                         help="The id of the GPU to use for baseline computation, "
                              "-1 for CPU (default: same as main_gpu).",
                         required=False)
     parser.add_argument('--save_dir', default="saved_models/experiments", help="The directory for saving the models.",
                         required=False)
-    parser.add_argument('--tensorboard', default=True, help="Activate tensorboard (default: True).", required=False)
-    parser.add_argument('--epoch', default=1000, help="Number of epochs (default: 1000).", required=False)
-    parser.add_argument('--learning_rate', default=.0001, help="Learning rate (default: 0.0001).", required=False)
-    parser.add_argument('--save_freq', default=10, help="Save model every _ epochs (default: 10).", required=False)
-    parser.add_argument('--step_per_epoch', default=2500, help="Number of step per epoch (default: 2500).",
+    parser.add_argument('--tensorboard', type=bool, default=True, help="Activate tensorboard (default: True).", required=False)
+    parser.add_argument('--epoch', tpye=int, default=1000, help="Number of epochs (default: 1000).", required=False)
+    parser.add_argument('--learning_rate', type=float, default=.0001, help="Learning rate (default: 0.0001).", required=False)
+    parser.add_argument('--save_freq', type=int, default=10, help="Save model every _ epochs (default: 10).", required=False)
+    parser.add_argument('--step_per_epoch', type=int, default=2500, help="Number of step per epoch (default: 2500).",
                         required=False)
-    parser.add_argument('--freq_update', default=500, help="Get update every _ steps (default: 500).", required=False)
-    parser.add_argument('--batch', default=8, help="Batch size (default: 512).", required=False)
-    parser.add_argument('--encoder_layer', default=3, help="Number of encoder layers (default: 3).", required=False)
-    parser.add_argument('--v', default=False, help="Verbose (default: False).", required=False)
+    parser.add_argument('--freq_update', type=int default=500, help="Get update every _ steps (default: 500).", required=False)
+    parser.add_argument('--batch', type=int, default=512, help="Batch size (default: 512).", required=False)
+    parser.add_argument('--encoder_layer', type=int, default=3, help="Number of encoder layers (default: 3).", required=False)
+    parser.add_argument('--v', type=bool, default=False, help="Verbose (default: False).", required=False)
 
     args = parser.parse_args()
     print(pprint.pprint(args))
