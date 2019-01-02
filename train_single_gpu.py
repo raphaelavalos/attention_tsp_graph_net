@@ -6,6 +6,7 @@ import numpy as np
 import tensorflow as tf
 from graph_nets import utils_tf
 from graph_nets import utils_np
+from graph_nets import graphs
 import argparse
 import os
 import pprint
@@ -20,12 +21,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Attention TSP Train Module")
     parser.add_argument('--nodes', default=20, type=int, help="The number of nodes per graph ex: 20, 50, 100.", required=False)
     parser.add_argument('--cuda', default=True, type=bool, help="Use cuda (default True)", required=False)
-    parser.add_argument('--main_gpu', type=int, default=0,
-                        help="The id of the GPU to use for the main computation, -1 for CPU (default: 0).",
-                        required=False)
-    parser.add_argument('--baseline_gpu', type=int, default=None,
-                        help="The id of the GPU to use for baseline computation, "
-                             "-1 for CPU (default: same as main_gpu).",
+    parser.add_argument('--gpu', type=int, default=0,
+                        help="The id of the GPU, -1 for CPU (default: 0).",
                         required=False)
     parser.add_argument('--save_dir', default="saved_models/experiments", help="The directory for saving the models.",
                         required=False)
@@ -86,24 +83,14 @@ if __name__ == '__main__':
     pprint.pprint(conf)
 
     # Device selection
-    if not args.cuda:
+    if not args.cuda or args.gpu == -1:
         device0 = "/cpu:0"
-        device1 = "/cpu:0"
     else:
-        baseline_gpu = args.main_gpu if args.baseline_gpu is None else args.baseline_gpu
-        if baseline_gpu == -1:
-            device1 = "/cpu:0"
-        else:
-            device1 = "/device:GPU:%i" % baseline_gpu
-        if args.main_gpu == -1:
-            device0 = "/cpu:0"
-        else:
-            device0 = "/device:GPU:%i" % args.main_gpu
+        device0 = "/device:GPU:%i" % args.gpu
 
     # Creating Graphs
 
     graph0 = tf.Graph()
-    graph1 = tf.Graph()
 
     # Model creation
 
@@ -113,107 +100,99 @@ if __name__ == '__main__':
     config.gpu_options.allow_growth = True
     config.allow_soft_placement=False
 
-    with graph1.device(device1):
-        sess1 = tf.Session(config=config)
-        baseline = AttentionTspModel(conf)
-        baseline.modify_state(False, True)
-        input_placeholder1 = utils_tf.placeholders_from_networkxs(sample)
-        _, _, _, baseline_cost = baseline(input_placeholder1)  # Get the cost by the baseline model
-
-        cost_summary_b = tf.summary.scalar('Mean cost - baseline', tf.reduce_mean(baseline_cost))
-        cost_summary_b_r = tf.summary.scalar('Mean cost - baseline, rollout', tf.reduce_mean(baseline_cost))
-
-        init1 = tf.global_variables_initializer()
-        init1_local = tf.local_variables_initializer()
-
     with graph0.device(device0):
         sess0 = tf.Session(config=config)
         # sess0 = tf_debug.TensorBoardDebugWrapperSession(sess0, "Artik:6064")
         model = AttentionTspModel(conf)
-        input_placeholder0 = utils_tf.placeholders_from_networkxs(sample)
-        baseline_placeholder = tf.placeholder(tf.float32)
-        _, computed_log_likelihood, result_graph, cost = model(input_placeholder0)
-        loss = tf.reduce_mean(tf.multiply(tf.subtract(cost, baseline_placeholder), computed_log_likelihood))
+        baseline = AttentionTspModel(conf)
+        baseline.modify_state(False, True)
+
+        # Create the random nodes
+        nodes = tf.random_uniform([conf.batch * conf.n_node, 2], minval=-1., maxval=1.)
+        # graph creation operation
+        graph_input = graphs.GraphsTuple(
+            nodes=nodes,
+            edges=None,
+            receivers=None,
+            senders=None,
+            globals=tf.zeros((conf.batch,), dtype=tf.float32),
+            n_node=tf.convert_to_tensor(np.full((conf.batch,), conf.n_node, dtype=np.int64)),
+            n_edge=tf.zeros((conf.batch,), dtype=tf.int64)
+        )
+
+        fully_connected_graph = utils_tf.fully_connect_graph_static(graph_input).replace(
+            edges=tf.zeros((2*conf.batch*conf.n_node,), dtype=tf.int64))
+
+        _, _, _, baseline_cost = baseline(fully_connected_graph)
+        baseline_cost = tf.stop_gradient(baseline_cost)
+        _, computed_log_likelihood, result_graph, cost = model(fully_connected_graph)
+        loss = tf.reduce_mean(tf.multiply(tf.subtract(cost, baseline_cost), computed_log_likelihood), name="loss")
+        loss0 = tf.reduce_mean(tf.multiply(cost, computed_log_likelihood), name="loss0")
+
+        baseline_cost_mean = tf.reduce_mean(baseline_cost)
+        model_cost_mean = tf.reduce_mean(cost)
+
         optimizer = tf.train.AdamOptimizer(learning_rate=args.learning_rate)
         optimizer = tf.contrib.estimator.clip_gradients_by_norm(optimizer, 1.0)
-        opt_step = optimizer.minimize(loss=loss)
+
+        opt_step = optimizer.minimize(loss=loss, var_list=model.get_variables())
+        opt_step0 = optimizer.minimize(loss=loss0, var_list=model.get_variables())
 
         cost_summary = tf.summary.scalar('Mean cost', tf.reduce_mean(cost))
         loss_summary = tf.summary.scalar('Loss', loss)
-
-        cost_summary_r = tf.summary.scalar('Mean cost - rollout', tf.reduce_mean(cost))
+        loss_summary0 = tf.summary.scalar('Loss', loss0)
 
         init0 = tf.global_variables_initializer()
         init0_local = tf.local_variables_initializer()
 
-    with graph0.device(device0):
         writer = tf.summary.FileWriter("log/", sess0.graph)
 
-    baseline_value = np.zeros((conf.batch,))
 
     with graph0.device(device0):
         sess0.run(init0)
         sess0.run(init0_local)
 
-    with graph1.device(device1):
-        sess1.run(init1)
-        sess1.run(init1_local)
-
     for epoch in trange(args.epoch, desc="Epoch"):
+        data = utils_np.networkxs_to_graphs_tuple(tsp_dataset.generate_networkx_batch(args.batch, args.nodes))
         for step in trange(args.step_per_epoch, desc="Step", leave=False):
             # create input
-            data = utils_np.networkxs_to_graphs_tuple(tsp_dataset.generate_networkx_batch(args.batch, args.nodes))
-            if epoch != 0:
-                with graph1.device(device1):
-                    sess1.run(init1_local)
-                    baseline_value, cost_summary_b_ = sess1.run(fetches=[baseline_cost, cost_summary_b],
-                                                                feed_dict={input_placeholder1: data})
             with graph0.device(device0):
                 sess0.run(init0_local)
-                loss_value, cost_value, _, cost_summary_, loss_summary_ = sess0.run(
-                    fetches=[loss, cost, opt_step, cost_summary, loss_summary],
-                    feed_dict={input_placeholder0: data, baseline_placeholder: baseline_value})
+                if epoch == 0:
+                    _, cost_summary_,  loss_summary_ = sess0.run(fetches=[opt_step0, cost_summary, loss_summary0],)
+                 #                                                feed_dict={input_placeholder: data})
 
-            # log
-            if args.tensorboard:
-                writer.add_summary(cost_summary_, step + epoch * args.step_per_epoch)
-                writer.add_summary(loss_summary_, step + epoch * args.step_per_epoch)
-                if epoch != 0:
-                    writer.add_summary(cost_summary_b_, step + epoch * args.step_per_epoch)
+                else:
+                    _, cost_summary_, loss_summary_ = sess0.run(fetches=[opt_step, cost_summary, loss_summary],)
+                #                                                feed_dict={input_placeholder: data})
+                if args.tensorboard:
+                    writer.add_summary(cost_summary_, step + epoch * args.step_per_epoch)
+                    writer.add_summary(loss_summary_, step + epoch * args.step_per_epoch)
 
         # Test baseline
+        cost_r_m = []
+        cost_r_b = []
         if epoch != 0:
-            baseline_cost_list = []
-            model_cost_list = []
             for step in trange(val_step, desc="Rollout step"):
                 data = utils_np.networkxs_to_graphs_tuple(tsp_dataset.generate_networkx_batch(args.batch, args.nodes))
-                with graph1.device(device1):
-                    sess1.run(init1_local)
-                    baseline_value, cost_summary_b_r_ = sess1.run(fetches=[baseline_cost, cost_summary_b_r],
-                                                                  feed_dict={input_placeholder1: data})
                 with graph0.device(device0):
                     sess0.run(init0_local)
-                    model_cost, cost_summary_r_ = sess0.run(
-                        fetches=[cost, cost_summary_r],
-                        feed_dict={input_placeholder0: data})
-                baseline_cost_list.append(baseline_value)
-                model_cost_list.append(model_cost)
-                if args.tensorboard:
-                    writer.add_summary(cost_summary_r_, step + epoch * val_step)
-                    writer.add_summary(cost_summary_b_r_, step + epoch * val_step)
-            bcm = np.array(baseline_cost_list).mean()
-            mcm = np.array(model_cost_list).mean()
+                    model_cost_mean_, baseline_cost_mean_ = sess0.run(
+                        fetches=[model_cost_mean, baseline_cost_mean],)
+                    #    feed_dict={input_placeholder: data})
+                    cost_r_m.append(model_cost_mean_)
+                    cost_r_b.append(baseline_cost_mean_)
+            bcm = np.array(cost_r_m).mean()
+            mcm = np.array(cost_r_b).mean()
             if bcm - mcm >= .05 * bcm:
                 print('Baseline updated')
                 with graph0.device(device0):
                     theta = model.save(sess0)
-                with graph1.device(device1):
-                    baseline.load(theta, sess1)
+                    baseline.load(theta, sess0)
         else:
             with graph0.device(device0):
                 theta = model.save(sess0)
-            with graph1.device(device1):
-                baseline.load(theta, sess1)
+                baseline.load(theta, sess0)
 
         if epoch != 0 and (epoch % args.save_freq == 0) or epoch == args.epoch - 1:
             with graph0.device(device0):

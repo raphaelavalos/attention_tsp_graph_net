@@ -61,7 +61,7 @@ class AttentionTspModel(snt.AbstractModule):
                            (self.conf.batch * self.conf.n_node, self.conf.init_dim)),
                 tf.reshape(blocks.broadcast_sender_nodes_to_edges(graph),
                            (self.conf.batch * self.conf.n_node, self.conf.init_dim))), axis=1))
-        cost = tf.reduce_sum(tf.reshape(distance, (self.conf.batch, self.conf.n_node)), axis=1)
+        cost = tf.reduce_sum(tf.reshape(distance, (self.conf.batch, self.conf.n_node)), axis=1, name="cost")
         graph = graph.replace(edges=distance, globals=cost)
         return graph, cost
 

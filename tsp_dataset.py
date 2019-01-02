@@ -1,6 +1,7 @@
 import numpy as np
 import networkx as nx
 from scipy import spatial
+from graph_nets import utils_np
 
 TSP_DIMENSION = 2
 DISTANCE_WEIGHT_NAME = 'features'
@@ -42,3 +43,7 @@ def generate_networkx_batch(num_graph=BATCH_SIZE, num_nodes=NODES_NUMBER):
 
     """
     return [generate_graph(num_nodes) for _ in range(num_graph)]
+
+
+def generate_dataset_iterator(num_step, num_graph=BATCH_SIZE, num_nodes=NODES_NUMBER):
+    return (utils_np.networkxs_to_graphs_tuple(generate_networkx_batch(num_graph, num_nodes)) for _ in range(num_step))
