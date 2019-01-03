@@ -55,12 +55,16 @@ class AttentionTspModel(snt.AbstractModule):
         edges = tf.zeros(self.conf.batch * self.conf.n_node)
         n_edge = tf.convert_to_tensor([self.conf.n_node] * self.conf.batch)
         graph = graph.replace(receivers=receivers, senders=senders, edges=edges, n_edge=n_edge)
-        distance = tf.sqrt(tf.reduce_sum(
-            tf.squared_difference(
+        distance = tf.norm(
+            tf.subtract(
                 tf.reshape(blocks.broadcast_receiver_nodes_to_edges(graph),
                            (self.conf.batch * self.conf.n_node, self.conf.init_dim)),
                 tf.reshape(blocks.broadcast_sender_nodes_to_edges(graph),
-                           (self.conf.batch * self.conf.n_node, self.conf.init_dim))), axis=1))
+                           (self.conf.batch * self.conf.n_node, self.conf.init_dim))
+            ),
+            ord=2,
+            axis=1
+        )
         cost = tf.reduce_sum(tf.reshape(distance, (self.conf.batch, self.conf.n_node)), axis=1, name="cost")
         graph = graph.replace(edges=distance, globals=cost)
         return graph, cost

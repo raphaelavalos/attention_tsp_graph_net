@@ -2,22 +2,18 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import pickle
 import numpy as np
 import tensorflow as tf
-from graph_nets import utils_tf
-from graph_nets import utils_np
 from graph_nets import graphs
-import options
-import os
-import tsp_dataset
-from collections import namedtuple
+from graph_nets import utils_tf
 from tensorflow.python import debug as tf_debug
-from models import AttentionTspModel
-import pickle
 from tqdm import trange
-from baseline import Baseline
+import options
+from models import AttentionTspModel
 
 tf.set_random_seed(1234)
+
 
 def get_validation_np(args, conf):
     if args.val_dataset is None:
@@ -106,9 +102,11 @@ if __name__ == '__main__':
         _, computed_log_likelihood, result_graph, cost = model(fully_connected_graph)
         model_cost_mean = tf.reduce_mean(cost)
         baseline_cost = tf.stop_gradient(baseline(fully_connected_graph)[3])
-        baseline_exp_cost = tf.stop_gradient(tf.add(tf.multiply(baseline_exp_cost, beta), (1. - beta) * model_cost_mean))
+        baseline_exp_cost = tf.stop_gradient(
+            tf.add(tf.multiply(baseline_exp_cost, beta), (1. - beta) * model_cost_mean))
         loss = tf.reduce_mean(tf.multiply(tf.subtract(cost, baseline_cost), computed_log_likelihood), name="loss")
-        loss_exp = tf.reduce_mean(tf.multiply(tf.subtract(cost, baseline_exp_cost), computed_log_likelihood), name="loss_exp")
+        loss_exp = tf.reduce_mean(tf.multiply(tf.subtract(cost, baseline_exp_cost), computed_log_likelihood),
+                                  name="loss_exp")
         baseline_cost_mean = tf.reduce_mean(baseline_cost)
 
         baseline_rollout_mean = 0
@@ -118,13 +116,10 @@ if __name__ == '__main__':
         opt_step = optimizer.minimize(loss=loss, var_list=model.get_variables())
         opt_step_exp = optimizer.minimize(loss=loss_exp, var_list=model.get_variables())
 
-
-
         cost_summary = tf.summary.scalar('Mean cost', tf.reduce_mean(cost))
         loss_summary = tf.summary.scalar('Loss', loss)
         validation_placeholder = tf.placeholder(tf.float32)
         validation_summary = tf.summary.scalar('Validation', validation_placeholder)
-
 
         init0 = tf.global_variables_initializer()
         init0_local = tf.local_variables_initializer()
@@ -155,9 +150,8 @@ if __name__ == '__main__':
                 sess0.run([init0_local])
                 val.append(sess0.run([model_cost_mean])[0])
             val = np.array(val, dtype=np.float32)
-            print('Validation: %f +/- %f' %(val.mean(), val.std()))
+            print('Validation: %f +/- %f' % (val.mean(), val.std()))
             writer.add_summary(sess0.run([validation_summary], {validation_placeholder: val.mean()})[0], epoch)
-
 
         # Test baseline
         cost_r_m = []
@@ -195,7 +189,6 @@ if __name__ == '__main__':
                     sess0.run(init0_local)
                     baseline_results.append(sess0.run([baseline_cost_mean])[0])
                 baseline_rollout_mean = np.mean(baseline_results)
-
 
         if epoch != 0 and (epoch % args.save_freq == 0) or epoch == args.epoch - 1:
             with graph0.device(device0):
