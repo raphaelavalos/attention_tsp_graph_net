@@ -141,15 +141,15 @@ class EncoderLayer(snt.AbstractModule):
                                                 name="feed_forward")
             self._feed_forward_residual = snt.Residual(self._feed_forward, name="feed_forward_residual")
 
-            self._part_encoder = snt.Sequential([lambda x: self._batch_norm0(x, is_training=self.training),
-                                                 self._feed_forward_residual,
-                                                 lambda x: self._batch_norm1(x, is_training=self.training)],
-                                                name="full_encoder")
-            self._part_encoder_block = blocks.NodeBlock(lambda: self._part_encoder,
-                                                        use_received_edges=False,
-                                                        use_nodes=True,
-                                                        use_globals=False,
-                                                        name="encoder_block")
+            # self._part_encoder = snt.Sequential([lambda x: self._batch_norm0(x, is_training=self.training),
+            #                                      self._feed_forward_residual,
+            #                                      lambda x: self._batch_norm1(x, is_training=self.training)],
+            #                                     name="full_encoder")
+            # self._part_encoder_block = blocks.NodeBlock(lambda: self._part_encoder,
+            #                                             use_received_edges=False,
+            #                                             use_nodes=True,
+            #                                             use_globals=False,
+            #                                             name="encoder_block")
 
     def modify_state(self, training=True):
         self.training = training
@@ -184,7 +184,15 @@ class EncoderLayer(snt.AbstractModule):
 
         """
         mha_residual_graph = self._mha(graph)
-        new_graph = self._part_encoder_block(mha_residual_graph)
+        nodes = tf.reshape(mha_residual_graph.nodes, (self.conf.batch, self.conf.n_node, self.conf.embedding_dim))
+        nodes = self._batch_norm0(nodes, is_training=self.training)
+        nodes = tf.reshape(nodes, (self.conf.batch * self.conf.n_node, self.conf.embedding_dim))
+        nodes = self._feed_forward_residual(nodes)
+        nodes = tf.reshape(nodes, (self.conf.batch, self.conf.n_node, self.conf.embedding_dim))
+        nodes = self._batch_norm1(nodes, is_training=self.training)
+        nodes = tf.reshape(nodes, (self.conf.batch * self.conf.n_node, self.conf.embedding_dim))
+
+        new_graph = graph.replace(nodes=nodes)
 
         return new_graph
 

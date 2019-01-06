@@ -117,7 +117,7 @@ if __name__ == '__main__':
         if rollout_enable:
             with tf.name_scope('baseline'):
                 baseline = AttentionTspModel(conf, name='baseline')
-                # baseline.modify_state(False, True)
+                baseline.modify_state(False, True)
                 beta = .8
                 baseline_exp_cost = tf.get_variable('exp_baseline/v', shape=(1,), dtype=tf.float32, trainable=False)
                 baseline_exp_cost = tf.stop_gradient(tf.add(beta * baseline_exp_cost, (1. - beta) * model_cost_mean))
