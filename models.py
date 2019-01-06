@@ -44,28 +44,19 @@ class AttentionTspModel(snt.AbstractModule):
         return dic
 
     def _build(self, graph):
-        pi, computed_log_likelihood = self._decoder(self._encoder(graph))
-        result_graph, cost = self.create_result_graph(graph, pi)
-        return pi, computed_log_likelihood, result_graph, cost
+        _log_p, pi = self._decoder(self._encoder(graph))
+        ll = self._calc_log_likelihood(_log_p, pi)
+        r_graph, cost = self.get_cost(graph, pi)
+        return ll, cost
 
-    def create_result_graph(self, graph, pi):
-        receivers = tf.roll(pi, shift=-1, axis=1)
-        receivers = tf.reshape(receivers, (self.conf.batch * self.conf.n_node, 1))
-        senders = tf.reshape(pi, (self.conf.batch * self.conf.n_node, 1))
-        edges = tf.zeros(self.conf.batch * self.conf.n_node)
-        n_edge = tf.convert_to_tensor([self.conf.n_node] * self.conf.batch)
-        graph = graph.replace(receivers=receivers, senders=senders, edges=edges, n_edge=n_edge)
-        distance = tf.norm(
-            tf.subtract(
-                tf.reshape(blocks.broadcast_receiver_nodes_to_edges(graph),
-                           (self.conf.batch * self.conf.n_node, self.conf.init_dim)),
-                tf.reshape(blocks.broadcast_sender_nodes_to_edges(graph),
-                           (self.conf.batch * self.conf.n_node, self.conf.init_dim))
-            ),
-            ord=2,
-            axis=1
-        )
-        cost = tf.reduce_sum(tf.reshape(distance, (self.conf.batch, self.conf.n_node)), axis=1, name="cost")
-        graph = graph.replace(edges=distance, globals=cost)
-        return graph, cost
+    def _calc_log_likelihood(self, _log_p, pi):
+        p = tf.nn.log_softmax(_log_p, -1)
+        ll = tf.batch_gather(p, tf.expand_dims(pi, -1))
+        return tf.squeeze(tf.reduce_sum(ll, 1))
+
+    def get_cost(self, graph, pi):
+        nodes = tf.reshape(graph.nodes, (self.conf.batch, self.conf.n_node, self.conf.init_dim))
+        ordered_nodes = tf.batch_gather(nodes, pi)  # (b,s,2)
+        new_cost = tf.reduce_sum(tf.norm(ordered_nodes - tf.roll(ordered_nodes, -1, 1), axis=-1), -1)
+        return graph, new_cost
 

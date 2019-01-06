@@ -28,25 +28,23 @@ class MultiHeadAttentionResidual(snt.AbstractModule):
         self.conf = conf
         self.training = True
         with self._enter_variable_scope():
-            initializers = {"w": tf.initializers.random_uniform(-self.conf.init_max, self.conf.init_max)}
             self._query_layer = snt.Linear(output_size=self.conf.head_nbr * self.conf.query_dim,
                                            use_bias=False,
-                                           initializers=initializers,
+                                           initializers={'w': utils.initializer(conf.embedding_dim)},
                                            name="query_computer")
             self._value_layer = snt.Linear(output_size=self.conf.head_nbr * self.conf.value_dim,
                                            use_bias=False,
-                                           initializers=initializers,
+                                           initializers={'w': utils.initializer(conf.embedding_dim)},
                                            name="value_computer")
             self._key_layer = snt.Linear(output_size=self.conf.head_nbr * self.conf.key_dim,
                                          use_bias=False,
-                                         initializers=initializers,
+                                         initializers={'w': utils.initializer(conf.embedding_dim)},
                                          name="key_computer")
             self._graph_mha = modules.SelfAttention("graph_self_attention")
-            self._W = tf.get_variable(name="multi_head_reducer",
-                                      shape=(self.conf.value_dim, self.conf.embedding_dim),
-                                      initializer=tf.initializers.random_uniform(-self.conf.init_max,
-                                                                                 self.conf.init_max),
-                                      trainable=True)
+            self._glimpse_l = snt.Linear(name='glimpse_linear',
+                                         output_size=self.conf.embedding_dim,
+                                         use_bias=False,
+                                         initializers={'w': utils.initializer(conf.embedding_dim)})
 
     def modify_state(self, training=True):
         self.training = training
@@ -56,7 +54,7 @@ class MultiHeadAttentionResidual(snt.AbstractModule):
             utils.load_linear(self._query_layer, dic["query_computer"], sess)
             utils.load_linear(self._value_layer, dic["value_layer"], sess)
             utils.load_linear(self._key_layer, dic["key_layer"], sess)
-            self._W.load(dic["multi_head_reducer"], sess)
+            utils.load_linear(self._glimpse_l, dic["glimpse_linear"], sess)
 
     def save(self, sess):
         with self._enter_variable_scope():
@@ -64,7 +62,7 @@ class MultiHeadAttentionResidual(snt.AbstractModule):
                 "query_computer": utils.save_linear(self._query_layer, sess),
                 "value_layer": utils.save_linear(self._value_layer, sess),
                 "key_layer": utils.save_linear(self._key_layer, sess),
-                "multi_head_reducer": self._W.eval(sess)
+                "glimpse_linear": utils.save_linear(self._glimpse_l, sess),
             }
         return dic
 
@@ -88,8 +86,9 @@ class MultiHeadAttentionResidual(snt.AbstractModule):
 
         attention_result = self._graph_mha(value, key, query, graph)
         nodes_a = attention_result.nodes
-        new_nodes = tf.einsum('ijk,kl->ijl', nodes_a, self._W)
-        new_nodes = tf.reduce_sum(new_nodes, axis=1)
+        new_nodes = self._glimpse_l(tf.reshape(nodes_a, (self.conf.batch * self.conf.n_node, self.conf.embedding_dim)))
+        # new_nodes = tf.einsum('ijk,kl->ijl', nodes_a, self._W)
+        # new_nodes = tf.reduce_sum(new_nodes, axis=1)
         return attention_result.replace(nodes=tf.add(new_nodes, nodes))
 
 
@@ -113,18 +112,28 @@ class EncoderLayer(snt.AbstractModule):
         self.conf = conf
         self.training = True
         with self._enter_variable_scope():
-            initializers = {"w": tf.initializers.random_uniform(-self.conf.init_max, self.conf.init_max),
-                            "b": tf.initializers.random_uniform(-self.conf.init_max, self.conf.init_max)}
+            batch_initializer = {'gamma': utils.initializer(conf.embedding_dim),
+                                 'moving_mean': utils.initializer(conf.embedding_dim),
+                                 'moving_variance': utils.initializer(conf.embedding_dim),
+                                 'beta': utils.initializer(conf.embedding_dim)}
 
             self._mha = MultiHeadAttentionResidual(conf)
 
-            self._batch_norm = snt.BatchNorm(scale=True)
+            self._batch_norm0 = snt.BatchNormV2(scale=True,
+                                                initializers=batch_initializer,
+                                                name="batch_norm0")
 
-            self._lin_to_hidden = snt.Linear(output_size=self.conf.ff_hidden_size,
-                                             initializers=initializers,
+            self._batch_norm1 = snt.BatchNormV2(scale=True,
+                                                initializers=batch_initializer,
+                                                name="batch_norm1")
+
+            self._lin_to_hidden = snt.Linear(output_size=conf.ff_hidden_size,
+                                             initializers={'w': utils.initializer(conf.embedding_dim),
+                                                           'b': utils.initializer(conf.embedding_dim)},
                                              name="lin_to_hidden")
-            self._hidden_to_ouput = snt.Linear(output_size=self.conf.embedding_dim,
-                                               initializers=initializers,
+            self._hidden_to_ouput = snt.Linear(output_size=conf.embedding_dim,
+                                               initializers={'w': utils.initializer(conf.ff_hidden_size),
+                                                             'b': utils.initializer(conf.ff_hidden_size)},
                                                name="hidden_to_ouput")
             self._feed_forward = snt.Sequential([self._lin_to_hidden,
                                                  tf.nn.relu,
@@ -132,10 +141,9 @@ class EncoderLayer(snt.AbstractModule):
                                                 name="feed_forward")
             self._feed_forward_residual = snt.Residual(self._feed_forward, name="feed_forward_residual")
 
-            # Todo: Check if same batch norm
-            self._part_encoder = snt.Sequential([lambda x: self._batch_norm(x, is_training=self.training),
+            self._part_encoder = snt.Sequential([lambda x: self._batch_norm0(x, is_training=self.training),
                                                  self._feed_forward_residual,
-                                                 lambda x: self._batch_norm(x, is_training=self.training)],
+                                                 lambda x: self._batch_norm1(x, is_training=self.training)],
                                                 name="full_encoder")
             self._part_encoder_block = blocks.NodeBlock(lambda: self._part_encoder,
                                                         use_received_edges=False,
@@ -149,15 +157,17 @@ class EncoderLayer(snt.AbstractModule):
     def load(self, dic, sess):
         with self._enter_variable_scope():
             self._mha.load(dic['multi_head_attention'], sess)
-            utils.load_batchnorm(self._batch_norm, dic['batch_norm'], sess)
-            utils.load_linear(self._lin_to_hidden, dic['lin_to_hidden'],sess, bias=True)
+            utils.load_batchnorm(self._batch_norm0, dic['batch_norm0'], sess)
+            utils.load_batchnorm(self._batch_norm1, dic['batch_norm1'], sess)
+            utils.load_linear(self._lin_to_hidden, dic['lin_to_hidden'], sess, bias=True)
             utils.load_linear(self._hidden_to_ouput, dic['hidden_to_output'], sess, bias=True)
 
     def save(self, sess):
         with self._enter_variable_scope():
             dic = {
                 "multi_head_attention": self._mha.save(sess),
-                "batch_norm": utils.save_batchnorm(self._batch_norm, sess),
+                "batch_norm0": utils.save_batchnorm(self._batch_norm0, sess),
+                "batch_norm1": utils.save_batchnorm(self._batch_norm1, sess),
                 "lin_to_hidden": utils.save_linear(self._lin_to_hidden, sess, bias=True),
                 "hidden_to_output": utils.save_linear(self._hidden_to_ouput, sess, bias=True)
             }
@@ -197,9 +207,9 @@ class Encoder(snt.AbstractModule):
         self.conf = conf
         self.training = True
         with self._enter_variable_scope():
-            initializers = {"w": tf.initializers.random_uniform(-self.conf.init_max, self.conf.init_max),
-                            "b": tf.initializers.random_uniform(-self.conf.init_max, self.conf.init_max)}
-            self._initial_projection = snt.Linear(output_size=self.conf.embedding_dim, initializers=initializers,
+            self._initial_projection = snt.Linear(output_size=self.conf.embedding_dim,
+                                                  initializers={'w': utils.initializer(conf.init_dim),
+                                                                'b': utils.initializer(conf.init_dim)},
                                                   name="initial_projection")
             self._initial_projection_block = blocks.NodeBlock(lambda: self._initial_projection,
                                                               use_received_edges=False,

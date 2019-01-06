@@ -3,7 +3,8 @@ import pprint
 import os
 import numpy as np
 from collections import namedtuple
-
+import time
+import json
 
 def get_options_and_config():
     parser = argparse.ArgumentParser(description="Attention TSP Train Module")
@@ -17,17 +18,17 @@ def get_options_and_config():
                         required=False)
     parser.add_argument('--tensorboard', type=bool, default=True, help="Activate tensorboard (default: True).",
                         required=False)
-    parser.add_argument('--epoch', type=int, default=1000, help="Number of epochs (default: 1000).", required=False)
-    parser.add_argument('--rollout_steps', type=int, default=20,
+    parser.add_argument('--epoch', type=int, default=100, help="Number of epochs (default: 100).", required=False)
+    parser.add_argument('--rollout_steps', type=int, default=2,
                         help="The number of batch that will be use in the rolling phase", required=False)
-    parser.add_argument('--learning_rate', type=float, default=.0001, help="Learning rate (default: 0.0001).",
+    parser.add_argument('--learning_rate', type=float, default=1e-4, help="Learning rate (default: 0.0001).",
                         required=False)
-    parser.add_argument('--save_freq', type=int, default=1, help="Save model every _ epochs (default: 10).",
+    parser.add_argument('--save_freq', type=int, default=10, help="Save model every _ epochs (default: 10).",
                         required=False)
     parser.add_argument('--step_per_epoch', type=int, default=2500, help="Number of step per epoch (default: 2500).",
                         required=False)
-    parser.add_argument('--freq_update', type=int, default=500, help="Get update every _ steps (default: 500).",
-                        required=False)
+    # parser.add_argument('--freq_update', type=int, default=500, help="Get update every _ steps (default: 500).",
+    #                     required=False)
     parser.add_argument('--batch', type=int, default=512, help="Batch size (default: 512).", required=False)
     parser.add_argument('--encoder_layer', type=int, default=3, help="Number of encoder layers (default: 3).",
                         required=False)
@@ -39,10 +40,13 @@ def get_options_and_config():
 
     args = parser.parse_args()
 
+    experiment_name = "TSP_%i_%s" % (args.nodes, time.strftime("%Y%m%d_%H%M%S"))
+
     # Make save dir compatible
-    os.makedirs(args.save_dir, exist_ok=True)
     if args.save_dir[-1] != '/':
         args.save_dir += '/'
+    args.save_dir += experiment_name + '/'
+    os.makedirs(args.save_dir, exist_ok=True)
 
     pprint.pprint(vars(args))
 
@@ -75,7 +79,13 @@ def get_options_and_config():
 
     conf = Config(batch=args.batch, learning_rate=args.learning_rate, head_nbr=HEAD_NBR, key_dim=KEY_DIM,
                   embedding_dim=EMBEDDING_DIM, value_dim=VALUE_DIM, query_dim=QUERY_DIM, init_dim=INIT_DIM,
-                  init_max=INIT_MAX, ff_hidden_size=FF_HIDDEN_SIZE, n_node=N_NODE, c=C,
+                  init_max=INIT_MAX, ff_hidden_size=FF_HIDDEN_SIZE, n_node=args.nodes, c=C,
                   encoder_nbr_layers=ENCODER_NBR_LAYERS)
 
-    return args, conf
+    with open(args.save_dir + 'args.json', 'w') as f:
+        json.dump(vars(args), f)
+
+    with open(args.save_dir + 'conf.json', 'w') as f:
+        json.dump(conf._asdict(), f)
+
+    return args, conf, experiment_name

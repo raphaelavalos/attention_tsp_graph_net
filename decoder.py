@@ -3,6 +3,7 @@ from __future__ import division
 from __future__ import print_function
 
 import numpy as np
+import math
 import tensorflow as tf
 from graph_nets import utils_tf
 from graph_nets import utils_np
@@ -21,67 +22,101 @@ class Decoder(snt.AbstractModule):
         self.training = True
         self.baseline = False
         with self._enter_variable_scope():
-            initializers = {"w": tf.initializers.random_uniform(-self.conf.init_max, self.conf.init_max)}
-            self._query_layer_0 = snt.Linear(output_size=self.conf.head_nbr * self.conf.query_dim,
-                                             use_bias=False,
-                                             initializers=initializers,
-                                             name="query_computer_0")
-            self._value_layer_0 = snt.Linear(output_size=self.conf.head_nbr * self.conf.value_dim,
-                                             use_bias=False,
-                                             initializers=initializers,
-                                             name="value_computer_0")
-            self._key_layer_0 = snt.Linear(output_size=self.conf.head_nbr * self.conf.key_dim,
-                                           use_bias=False,
-                                           initializers=initializers,
-                                           name="key_computer_0")
-            self._query_layer_1 = snt.Linear(output_size=self.conf.embedding_dim,
-                                             use_bias=False,
-                                             initializers=initializers,
-                                             name="query_computer_1")
-            self._key_layer_1 = snt.Linear(output_size=self.conf.embedding_dim,
-                                           use_bias=False,
-                                           initializers=initializers,
-                                           name="key_computer_1")
-            self._v1 = tf.get_variable(name="v1",
-                                       shape=(1, self.conf.embedding_dim),
-                                       trainable=True)
-            self._vf = tf.get_variable(name="vf",
-                                       shape=(1, self.conf.embedding_dim),
-                                       trainable=True)
-            self._W = tf.get_variable(name="multi_head_reducer",
-                                      shape=(self.conf.value_dim, self.conf.embedding_dim),
-                                      initializer=tf.initializers.random_uniform(-self.conf.init_max,
-                                                                                 self.conf.init_max),
-                                      trainable=True)
+            base_init = tf.initializers.random_uniform(-self.conf.init_max, self.conf.init_max)
 
-    def modify_state(self, training=True, baseline=False):
-        self.training = training
-        self.baseline = baseline
+            self.W_placeholder = tf.get_variable(name="w_placeholder",
+                                                 shape=(1, 2 * conf.embedding_dim),
+                                                 initializer=utils.initializer(conf.embedding_dim),
+                                                 dtype=tf.float32)
 
-    def load(self, dic, sess):
-        with self._enter_variable_scope():
-            utils.load_linear(self._query_layer_0, dic["query_computer_0"], sess)
-            utils.load_linear(self._value_layer_0, dic["value_computer_0"], sess)
-            utils.load_linear(self._key_layer_0, dic["key_computer_0"], sess)
-            utils.load_linear(self._query_layer_1, dic["query_computer_1"], sess)
-            utils.load_linear(self._key_layer_1, dic["key_computer_1"], sess)
-            self._v1.load(dic["v1"], sess)
-            self._vf.load(dic["vf"], sess)
-            self._W.load(dic["multi_head_reducer"], sess)
+            self._precompute_l = snt.Linear(name="precompute_linear",
+                                            output_size=3 * self.conf.embedding_dim,
+                                            use_bias=False,
+                                            initializers={'w': utils.initializer(conf.embedding_dim)})
 
-    def save(self, sess):
-        with self._enter_variable_scope():
-            dic = {
-                "query_computer_0": utils.save_linear(self._query_layer_0, sess),
-                "value_computer_0": utils.save_linear(self._value_layer_0, sess),
-                "key_computer_0": utils.save_linear(self._key_layer_0, sess),
-                "query_computer_1": utils.save_linear(self._query_layer_1, sess),
-                "key_computer_1": utils.save_linear(self._key_layer_1, sess),
-                "v1": self._v1.eval(sess),
-                "vf": self._vf.eval(sess),
-                "multi_head_reducer": self._W.eval(sess)
-            }
-        return dic
+            self._fixed_context_l = snt.Linear(name="fixed_context_linear",
+                                               output_size=self.conf.embedding_dim,
+                                               use_bias=False,
+                                               initializers={'w': utils.initializer(conf.embedding_dim)})
+
+            self._step_context_l = snt.Linear(name="step_context_linear",
+                                              output_size=self.conf.embedding_dim,
+                                              use_bias=False,
+                                              initializers={'w': utils.initializer(2 * conf.embedding_dim)})
+
+            self._glimpse_l = snt.Linear(name='glimpse_linear',
+                                         output_size=self.conf.embedding_dim,
+                                         use_bias=False,
+                                         initializers={'w': utils.initializer(conf.embedding_dim)})
+
+    def _precompute(self, nodes, graph_em):
+        # nodes shape should be [batch * n_node, e_dim]
+        with tf.name_scope('precompute'):
+            out = tf.reshape(self._precompute_l(nodes),
+                             (self.conf.batch, self.conf.n_node, 3 * self.conf.embedding_dim))
+            key_context, value_context, key = tf.split(out, num_or_size_splits=3, axis=-1)
+            key_context = tf.reshape(key_context,
+                                     (self.conf.batch, self.conf.n_node, self.conf.head_nbr, self.conf.key_dim))
+            value_context = tf.reshape(value_context,
+                                       (self.conf.batch, self.conf.n_node, self.conf.head_nbr, self.conf.value_dim))
+            fixed_context = tf.reshape(self._fixed_context_l(graph_em),
+                                       (self.conf.batch, self.conf.head_nbr, self.conf.query_dim))
+
+        return key_context, value_context, key, fixed_context
+
+    def _get_log_p(self, nodes, attention_node_fixed, state):
+        with tf.name_scope('get_log_p'):
+            key_context, value_context, key, fixed_context = attention_node_fixed
+            prev_a, first_a, mask = state
+            if first_a is None:
+                step_context = self._step_context_l(self.W_placeholder)
+                step_context = tf.reshape(step_context, (1, self.conf.head_nbr, self.conf.query_dim))
+                step_context = tf.broadcast_to(step_context, (self.conf.batch, self.conf.head_nbr, self.conf.key_dim))
+            else:
+                step_context = tf.concat([tf.batch_gather(nodes, tf.expand_dims(prev_a, -1)),
+                                          tf.batch_gather(nodes, tf.expand_dims(first_a, -1))], axis=-1)
+                step_context = tf.squeeze(step_context, axis=1)
+                step_context = self._step_context_l(step_context)
+                step_context = tf.reshape(step_context, (self.conf.batch, self.conf.head_nbr, self.conf.key_dim))
+            query_context = fixed_context + step_context
+            logits = self._one_to_many_logits(query_context, key_context, value_context, key, mask)
+        return logits
+
+    def _one_to_many_logits(self, query_context, key_context, value_context, key, mask):
+        with tf.name_scope('one_to_many_logits'):
+            compatibility = tf.expand_dims(query_context, 1) * key_context
+            compatibility = tf.reduce_sum(compatibility, axis=-1) / np.sqrt(self.conf.key_dim, dtype=np.float32)
+            compatibility -= 100000 * tf.expand_dims(mask, axis=-1)
+            attention_weight = tf.nn.softmax(compatibility, axis=1, name="attention_weight")
+            glimpse_multi = tf.multiply(tf.expand_dims(attention_weight, -1), value_context)
+            glimpse_multi = tf.reduce_sum(glimpse_multi, axis=1)
+            glimpse = self._glimpse_l(tf.reshape(glimpse_multi, (self.conf.batch, self.conf.embedding_dim)))
+            logits0 = tf.reduce_sum(tf.expand_dims(glimpse, 1) * key, axis=-1) / np.sqrt(self.conf.embedding_dim,
+                                                                                         dtype=np.float32)
+            logits = self.conf.c * tf.tanh(logits0, name="clip_logits")
+            logits -= 100000 * mask
+            return logits
+
+    def _select_node(self, logits):
+        with tf.name_scope('select_node'):
+            if self.baseline:
+                selected = tf.argmax(logits, axis=1, output_type=tf.int32)
+            else:
+                selected = tf.reshape(tf.random.multinomial(logits, num_samples=1, output_dtype=tf.int32),
+                                      shape=(self.conf.batch,))
+        return selected
+
+    def _update_state(self, state, selected):
+        prev_a, first_a, mask = state
+        prev_a = selected
+        if first_a is None:
+            first_a = prev_a
+        mask = mask + tf.one_hot(selected, depth=self.conf.n_node)
+        return prev_a, first_a, mask
+
+    def _init_state(self):
+        mask = tf.zeros(shape=(self.conf.batch, self.conf.n_node))
+        return None, None, mask
 
     def _build(self, graph):
         """Decodes the graph
@@ -93,100 +128,44 @@ class Decoder(snt.AbstractModule):
             The ordered indices
         """
 
+        outputs = []
+        sequences = []
         nodes = graph.nodes
         graph_em = graph.globals
-
-        value = tf.reshape(self._value_layer_0(nodes),
-                           (self.conf.batch, self.conf.n_node, self.conf.head_nbr, self.conf.value_dim))
-        key = tf.reshape(self._key_layer_0(nodes),
-                         (self.conf.batch, self.conf.n_node, self.conf.head_nbr, self.conf.key_dim))
-        key_1 = tf.reshape(self._key_layer_1(nodes), (self.conf.batch, self.conf.n_node, self.conf.embedding_dim))
+        attention_node_fixed = self._precompute(nodes, graph_em)
 
         nodes = tf.reshape(nodes, (self.conf.batch, self.conf.n_node, self.conf.embedding_dim))
 
-        pi = tf.get_local_variable(name="pi",
-                                   initializer=tf.convert_to_tensor(
-                                       np.full((self.conf.batch, self.conf.n_node), 0, dtype=np.int64)),
-                                   dtype=tf.int64,
-                                   trainable=False)
-
-        mask = tf.get_local_variable(name="mask",
-                                     initializer=tf.convert_to_tensor(
-                                         np.full((self.conf.batch, self.conf.n_node), True)),
-                                     dtype=tf.bool,
-                                     trainable=False)
-
-        output_log_proba = []
+        state = self._init_state()
 
         for t in range(self.conf.n_node):
-            # Computing query context
-            if t == 0:
-                v1 = tf.tile(self._v1, tf.convert_to_tensor([self.conf.batch, 1]))
-                vf = tf.tile(self._vf, tf.convert_to_tensor([self.conf.batch, 1]))
-                h_c = tf.concat([graph_em, v1, vf], axis=1)
-            else:
+            logits = self._get_log_p(nodes, attention_node_fixed, state)
+            selected = self._select_node(logits)
+            state = self._update_state(state, selected)
+            outputs.append(logits)
+            sequences.append(selected)
 
-                h1 = tf.gather_nd(nodes, tf.stack([tf.range(self.conf.batch, dtype=tf.int64), pi[:, 0]], axis=1))
-                hf = tf.gather_nd(nodes, tf.stack([tf.range(self.conf.batch, dtype=tf.int64), pi[:, t - 1]], axis=1))
-                h_c = tf.concat([graph_em, hf, h1], axis=1)
+        return tf.stack(outputs, axis=1), tf.stack(sequences, axis=1)
 
-            query_context = tf.reshape(self._query_layer_0(h_c),
-                                       (self.conf.batch, 1, self.conf.head_nbr, self.conf.query_dim))
+    def modify_state(self, training=True, baseline=False):
+        self.training = training
+        self.baseline = baseline
 
-            if t != 0:
-                mask = tf.scatter_nd_update(mask,
-                                            tf.stack([tf.range(self.conf.batch, dtype=tf.int64), pi[:, t - 1]], axis=1),
-                                            tf.broadcast_to(False, [self.conf.batch]))
+    def load(self, dic, sess):
+        with self._enter_variable_scope():
+            self.W_placeholder.load(dic["W_placeholder"], sess)
+            utils.load_linear(self._precompute_l, dic["precompute_linear"], sess)
+            utils.load_linear(self._fixed_context_l, dic["fixed_context_linear"], sess)
+            utils.load_linear(self._step_context_l, dic["step_context_linear"], sess)
+            utils.load_linear(self._glimpse_l, dic["glimpse_linear"], sess)
 
-            u_c = tf.multiply(query_context, key)
-            u_c = tf.reduce_sum(u_c / tf.convert_to_tensor(np.sqrt(self.conf.key_dim).astype(dtype=np.float32)),
-                                axis=-1)
-            u_c = tf.boolean_mask(u_c, mask)
-            a = tf.reshape(tf.nn.softmax(u_c), (self.conf.batch, self.conf.n_node - t, self.conf.head_nbr, 1))
-            masked_value = tf.reshape(tf.boolean_mask(value, mask),
-                                      (self.conf.batch, self.conf.n_node - t, self.conf.head_nbr, self.conf.value_dim))
-            h_tmp = tf.reduce_sum(tf.multiply(masked_value, a), axis=1)
-            h_c_n = tf.reduce_sum(tf.einsum('ijk,kl->ijl', h_tmp, self._W), axis=1)
-
-            query_c = tf.expand_dims(self._query_layer_1(h_c_n), axis=1)
-
-            u_c_n = self.conf.c * tf.nn.tanh(
-                tf.reduce_sum(tf.multiply(query_c, key_1), axis=2) / tf.convert_to_tensor(
-                    np.sqrt(self.conf.embedding_dim).astype(np.float32)))
-
-            if t != 0:
-                indices = tf.cast(tf.where(tf.logical_not(mask)), tf.int64)
-                val_masked = tf.SparseTensor(indices, tf.broadcast_to(tf.float32.min, [self.conf.batch * t]),
-                                             (self.conf.batch, self.conf.n_node))
-
-                u_c_n = tf.add(u_c_n, tf.sparse.to_dense(val_masked))
-
-            output_log_proba.append(tf.nn.log_softmax(u_c_n, axis=1))
-
-            if self.baseline:
-                pi_t = tf.argmax(output_log_proba[-1], axis=1)
-            else:
-                pi_t = tf.random.multinomial(output_log_proba[-1], num_samples=1)
-                pi_t = tf.reshape(pi_t, shape=(self.conf.batch,))
-
-            pi = tf.scatter_nd_update(pi,
-                                      tf.stack([tf.range(self.conf.batch, dtype=tf.int64),
-                                                tf.cast(tf.broadcast_to(t, [self.conf.batch]), tf.int64)], axis=1),
-                                      pi_t)
-
-
-        stacked_log_proba = tf.stack(output_log_proba, axis=1)
-        index = tf.stack([tf.convert_to_tensor(
-            np.array([i for i in range(self.conf.batch) for _ in range(self.conf.n_node)], dtype=np.int64)),
-                          tf.convert_to_tensor(
-                              np.array([i for _ in range(self.conf.batch) for i in range(self.conf.n_node)],
-                                       dtype=np.int64)),
-                          tf.reshape(pi, (self.conf.n_node * self.conf.batch,))],
-                         axis=-1)
-
-        computed_log_likelihood = tf.reshape(tf.gather_nd(stacked_log_proba, index),
-                                             shape=(self.conf.batch, self.conf.n_node))
-
-        computed_log_likelihood = tf.reduce_sum(computed_log_likelihood, axis=1)
-
-        return pi, computed_log_likelihood
+    def save(self, sess):
+        with self._enter_variable_scope():
+            dic = {
+                "W_placeholder": self.W_placeholder.eval(sess),
+                "precompute_linear": utils.save_linear(self._precompute_l, sess),
+                "fixed_context_linear": utils.save_linear(self._fixed_context_l, sess),
+                "step_context_linear": utils.save_linear(self._step_context_l, sess),
+                "glimpse_linear": utils.save_linear(self._glimpse_l, sess),
+            }
+        return dic
