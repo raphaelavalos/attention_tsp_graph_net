@@ -11,10 +11,10 @@ def load_linear(linear, dic, sess, bias=False):
 
 def load_batchnorm(batchnorm, dic, sess):
     with sess.as_default():
-        # batchnorm.beta = tf.convert_to_tensor(dic['beta'])
-        # batchnorm.gamma = tf.convert_to_tensor(dic['gamma'])
-        # batchnorm.moving_mean = tf.convert_to_tensor(dic['moving_mean'])
-        # batchnorm.moving_variance = tf.convert_to_tensor(dic['moving_variance'])
+        #batchnorm.beta = tf.convert_to_tensor(dic['beta'])
+        #batchnorm.gamma = tf.convert_to_tensor(dic['gamma'])
+        #batchnorm.moving_mean = tf.convert_to_tensor(dic['moving_mean'])
+        #batchnorm.moving_variance = tf.convert_to_tensor(dic['moving_variance'])
         batchnorm.get_variables()[0].load(dic['beta0'])
         batchnorm.get_variables()[1].load(dic['gamma0'])
 
